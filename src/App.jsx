@@ -64,6 +64,15 @@ const MOCK_CANDLES = [
 const MOCK_SUPPLY_ZONE = { from: 22, to: 27, top: 3468.2, bottom: 3459.8 };
 const MOCK_DEMAND_ZONE = { from: 30, to: 35, top: 3417.9, bottom: 3389.5 };
 
+const MOCK_SIGNAL = {
+  direction: "sell",
+  entry: 3452.8,
+  sl: 3460.2,
+  tp1: 3438.0,
+  tp2: 3418.0,
+  tp3: 3396.5,
+};
+
 // Peta timeframe UI -> parameter interval yang dipahami /api/ohlc
 const TF_TO_INTERVAL = { M5: "M5", M15: "M15", H1: "H1", H4: "H4" };
 const POLL_MS = 60_000; // Twelve Data free tier: cukup poll tiap 60 detik
@@ -73,7 +82,7 @@ const TIMEFRAMES = ["M5", "M15", "H1", "H4"];
 // ---------------------------------------------------------------------------
 // Chart
 // ---------------------------------------------------------------------------
-function CandleChart({ candles, zones, showZones }) {
+function CandleChart({ candles, zones, signal, showZones }) {
   const width = 860;
   const height = 380;
   const padL = 12;
@@ -81,7 +90,8 @@ function CandleChart({ candles, zones, showZones }) {
   const padT = 16;
   const padB = 24;
 
-  const allPrices = candles.flat();
+  const signalPrices = signal ? [signal.entry, signal.sl, signal.tp1, signal.tp2, signal.tp3] : [];
+  const allPrices = [...candles.flat(), ...signalPrices];
   const min = Math.min(...allPrices);
   const max = Math.max(...allPrices);
   const range = max - min || 1;
@@ -122,6 +132,20 @@ function CandleChart({ candles, zones, showZones }) {
     </g>
   );
 
+  const priceLine = (price, color, label, dash = "5 3") => {
+    const y = yAt(price);
+    const labelW = label.length * 5.6 + 12;
+    return (
+      <g>
+        <line x1={padL} x2={width - padR} y1={y} y2={y} stroke={color} strokeWidth="1.1" strokeDasharray={dash} opacity="0.9" />
+        <rect x={padL + 4} y={y - 9} width={labelW} height={15} rx="3" fill={C.void} stroke={color} strokeWidth="1" />
+        <text x={padL + 4 + labelW / 2} y={y + 2.5} fill={color} fontFamily={FONT_MONO} fontSize="9.5" textAnchor="middle">
+          {label}
+        </text>
+      </g>
+    );
+  };
+
   return (
     <svg viewBox={`0 0 ${width} ${height}`} width="100%" style={{ display: "block" }}>
       {gridPrices.map((p, i) => (
@@ -148,6 +172,12 @@ function CandleChart({ candles, zones, showZones }) {
 
       {showZones && zones?.supply && zoneRect(zones.supply, C.bear, C.bearWash, "SUPPLY / OB BEARISH")}
       {showZones && zones?.demand && zoneRect(zones.demand, C.bull, C.bullWash, "DEMAND / OB BULLISH")}
+
+      {signal && priceLine(signal.entry, C.gold, `ENTRY ${signal.entry.toFixed(2)}`, "1 0")}
+      {signal && priceLine(signal.sl, C.bear, `SL ${signal.sl.toFixed(2)}`)}
+      {signal && priceLine(signal.tp1, C.bull, `TP1 ${signal.tp1.toFixed(2)}`)}
+      {signal && priceLine(signal.tp2, C.bull, `TP2 ${signal.tp2.toFixed(2)}`)}
+      {signal && priceLine(signal.tp3, C.bull, `TP3 ${signal.tp3.toFixed(2)}`)}
 
       {candles.map(([o, h, l, c], i) => {
         const up = c >= o;
@@ -249,7 +279,8 @@ function BiasCard() {
   );
 }
 
-function SignalCard() {
+function SignalCard({ signal }) {
+  const isSell = signal.direction === "sell";
   return (
     <div
       style={{
@@ -270,27 +301,29 @@ function SignalCard() {
             fontFamily: FONT_MONO,
             fontSize: 11,
             color: C.void,
-            background: C.bear,
+            background: isSell ? C.bear : C.bull,
             padding: "3px 9px",
             borderRadius: 4,
             letterSpacing: "0.03em",
           }}
         >
-          SELL
+          {isSell ? "SELL" : "BUY"}
         </span>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
         {[
-          ["Entry", "3452.80"],
-          ["Stop loss", "3460.20"],
-          ["Take profit", "3418.00"],
+          ["Entry", signal.entry],
+          ["Stop loss", signal.sl],
+          ["Take profit 1", signal.tp1],
+          ["Take profit 2", signal.tp2],
+          ["Take profit 3", signal.tp3],
         ].map(([label, value]) => (
           <div key={label}>
             <div style={{ fontFamily: FONT_UI, fontSize: 11, color: C.muted, marginBottom: 4 }}>
               {label}
             </div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 16, color: C.text }}>{value}</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 16, color: C.text }}>{value.toFixed(2)}</div>
           </div>
         ))}
       </div>
@@ -366,7 +399,7 @@ function ZonesList() {
 // ---------------------------------------------------------------------------
 // Main app
 // ---------------------------------------------------------------------------
-export default function AurumAnalyzer() {
+export default function BimaMarketAnalyzer() {
   const [source, setSource] = useState("both");
   const [timeframe, setTimeframe] = useState("H1");
   const [ohlcText, setOhlcText] = useState("");
@@ -417,6 +450,7 @@ export default function AurumAnalyzer() {
 
   const activeCandles = feedState === "live" && liveCandles ? liveCandles : MOCK_CANDLES;
   const activeZones = feedState === "live" ? null : { supply: MOCK_SUPPLY_ZONE, demand: MOCK_DEMAND_ZONE };
+  const activeSignal = feedState === "live" ? null : MOCK_SIGNAL;
 
   const steps = ["Membaca data OHLC", "Membaca screenshot chart", "Mendeteksi order block", "Menyusun kesimpulan"];
   const [stepIndex, setStepIndex] = useState(0);
@@ -472,8 +506,8 @@ export default function AurumAnalyzer() {
         }}
       >
         <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
-          <span style={{ fontFamily: FONT_DISPLAY, fontSize: 26, fontWeight: 600, letterSpacing: "0.01em" }}>
-            Aurum
+          <span style={{ fontFamily: FONT_DISPLAY, fontSize: 23, fontWeight: 600, letterSpacing: "0.01em" }}>
+            BIMA_MARKET
           </span>
           <span style={{ fontFamily: FONT_MONO, fontSize: 13, color: C.muted }}>XAUUSD · analisis chart</span>
         </div>
@@ -692,7 +726,7 @@ export default function AurumAnalyzer() {
                 )}
               </div>
             </div>
-            <CandleChart candles={activeCandles} zones={activeZones} showZones={showZonesOnChart} />
+            <CandleChart candles={activeCandles} zones={activeZones} signal={showZonesOnChart ? activeSignal : null} showZones={showZonesOnChart} />
             {feedState === "live" && (
               <p style={{ fontFamily: FONT_UI, fontSize: 11.5, color: C.faint, marginTop: 10, marginBottom: 0 }}>
                 Data live tersambung — deteksi zona otomatis untuk data real belum aktif, masih pakai contoh ilustrasi sampai algoritma OB/FVG dipasang.
@@ -713,7 +747,7 @@ export default function AurumAnalyzer() {
               }}
             >
               <BiasCard />
-              <SignalCard />
+              <SignalCard signal={MOCK_SIGNAL} />
               <ZonesList />
             </div>
           )}
