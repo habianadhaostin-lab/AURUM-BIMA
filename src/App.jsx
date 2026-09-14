@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useRef } from "react";
+import { analyzeMarket } from "./lib/smc";
 import {
   Upload,
   Play,
@@ -60,77 +61,6 @@ const MOCK_CANDLES = [
   [3411.7, 3414.9, 3403.5, 3406.1], [3406.1, 3409.2, 3398.8, 3401.4],
   [3401.4, 3404.6, 3393.2, 3396.7], [3396.7, 3399.8, 3389.5, 3392.9],
 ];
-
-const MOCK_SUPPLY_ZONE = { from: 22, to: 27, top: 3468.2, bottom: 3459.8 };
-const MOCK_DEMAND_ZONE = { from: 30, to: 35, top: 3417.9, bottom: 3389.5 };
-
-const MOCK_SIGNAL = {
-  direction: "sell",
-  entry: 3452.8,
-  sl: 3460.2,
-  tp1: 3438.0,
-  tp2: 3418.0,
-  tp3: 3396.5,
-};
-
-const MOCK_FVG = { top: 3443.8, bottom: 3441.3 };
-
-// Harga acuan dari data mock (close candle terakhir) — dipakai sebagai basis
-// rasio supaya overlay ilustrasi bisa diskalakan ke harga berapa pun.
-const MOCK_ANCHOR = MOCK_CANDLES[MOCK_CANDLES.length - 1][3];
-const RATIO = {
-  entry: MOCK_SIGNAL.entry / MOCK_ANCHOR,
-  sl: MOCK_SIGNAL.sl / MOCK_ANCHOR,
-  tp1: MOCK_SIGNAL.tp1 / MOCK_ANCHOR,
-  tp2: MOCK_SIGNAL.tp2 / MOCK_ANCHOR,
-  tp3: MOCK_SIGNAL.tp3 / MOCK_ANCHOR,
-  supplyTop: MOCK_SUPPLY_ZONE.top / MOCK_ANCHOR,
-  supplyBottom: MOCK_SUPPLY_ZONE.bottom / MOCK_ANCHOR,
-  demandTop: MOCK_DEMAND_ZONE.top / MOCK_ANCHOR,
-  demandBottom: MOCK_DEMAND_ZONE.bottom / MOCK_ANCHOR,
-  fvgTop: MOCK_FVG.top / MOCK_ANCHOR,
-  fvgBottom: MOCK_FVG.bottom / MOCK_ANCHOR,
-};
-
-// PENTING: ini BUKAN algoritma deteksi order block sungguhan — cuma
-// menskalakan pola contoh (rasio dari MOCK_SIGNAL/MOCK_*_ZONE) ke harga
-// terakhir yang sedang tampil, supaya angkanya konsisten dengan chart
-// (live atau mock) selagi algoritma deteksi real belum dipasang.
-function buildIllustrativeOverlay(candles) {
-  const lastClose = candles[candles.length - 1][3];
-  const n = candles.length;
-  const clampIdx = (i) => Math.max(0, Math.min(n - 1, i));
-
-  const zones = {
-    supply: {
-      from: clampIdx(n - 14),
-      to: clampIdx(n - 9),
-      top: lastClose * RATIO.supplyTop,
-      bottom: lastClose * RATIO.supplyBottom,
-    },
-    demand: {
-      from: clampIdx(n - 6),
-      to: clampIdx(n - 1),
-      top: lastClose * RATIO.demandTop,
-      bottom: lastClose * RATIO.demandBottom,
-    },
-    fvg: {
-      top: lastClose * RATIO.fvgTop,
-      bottom: lastClose * RATIO.fvgBottom,
-    },
-  };
-
-  const signal = {
-    direction: MOCK_SIGNAL.direction,
-    entry: lastClose * RATIO.entry,
-    sl: lastClose * RATIO.sl,
-    tp1: lastClose * RATIO.tp1,
-    tp2: lastClose * RATIO.tp2,
-    tp3: lastClose * RATIO.tp3,
-  };
-
-  return { zones, signal };
-}
 
 // Peta timeframe UI -> parameter interval yang dipahami /api/ohlc
 const TF_TO_INTERVAL = { M5: "M5", M15: "M15", H1: "H1", H4: "H4" };
@@ -319,21 +249,25 @@ function SegmentedControl({ options, value, onChange }) {
   );
 }
 
-function BiasCard({ zones, signal }) {
+function BiasCard({ direction, confidence, zones }) {
+  const isBull = direction === "bullish";
+  const color = isBull ? C.bull : C.bear;
+  const zoneRef = isBull ? zones.demand : zones.supply;
+  const Icon = isBull ? TrendingUp : TrendingDown;
   return (
     <div style={{ borderTop: `1px solid ${C.hair}`, paddingTop: 18 }}>
       <SectionLabel>Bias pasar</SectionLabel>
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
-        <TrendingDown size={20} color={C.bear} strokeWidth={2.2} />
-        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 22, color: C.bear, fontWeight: 600 }}>
-          Bearish
+        <Icon size={20} color={color} strokeWidth={2.2} />
+        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 22, color, fontWeight: 600 }}>
+          {isBull ? "Bullish" : "Bearish"}
         </span>
-        <span style={{ fontFamily: FONT_MONO, fontSize: 13, color: C.muted }}>72% keyakinan</span>
+        <span style={{ fontFamily: FONT_MONO, fontSize: 13, color: C.muted }}>{confidence}% keyakinan</span>
       </div>
       <p style={{ fontFamily: FONT_UI, fontSize: 13.5, color: C.muted, lineHeight: 1.6, margin: 0 }}>
-        Harga menyapu likuiditas di atas {zones.supply.top.toFixed(1)} lalu meninggalkan order
-        block bearish yang belum diuji. Struktur masih menurun selama harga tertahan di bawah{" "}
-        {signal.entry.toFixed(1)}.
+        Break of structure ke arah {isBull ? "atas" : "bawah"} terdeteksi, meninggalkan order block{" "}
+        {isBull ? "bullish" : "bearish"} di {zoneRef.bottom.toFixed(2)}–{zoneRef.top.toFixed(2)} yang{" "}
+        {zoneRef.mitigated ? "sudah pernah disentuh ulang" : "belum diuji ulang"}.
       </p>
     </div>
   );
@@ -418,22 +352,22 @@ function ZonesList({ zones, tf }) {
       type: "Order block bearish",
       range: `${fmt(zones.supply.bottom)} – ${fmt(zones.supply.top)}`,
       tf,
-      status: "Belum diuji",
+      status: zones.supply.mitigated ? "Sudah diuji ulang" : "Belum diuji",
       dir: "down",
     },
     {
       type: "Order block bullish",
       range: `${fmt(zones.demand.bottom)} – ${fmt(zones.demand.top)}`,
       tf,
-      status: "Belum diuji",
+      status: zones.demand.mitigated ? "Sudah diuji ulang" : "Belum diuji",
       dir: "up",
     },
     {
-      type: "Fair value gap",
+      type: `Fair value gap ${zones.fvg.type === "bullish" ? "bullish" : "bearish"}`,
       range: `${fmt(zones.fvg.bottom)} – ${fmt(zones.fvg.top)}`,
       tf,
-      status: "Terisi sebagian",
-      dir: "down",
+      status: zones.fvg.mitigated ? "Sudah terisi" : "Belum terisi",
+      dir: zones.fvg.type === "bullish" ? "up" : "down",
     },
   ];
   return (
@@ -528,9 +462,9 @@ export default function BimaMarketAnalyzer() {
   }, [timeframe]);
 
   const activeCandles = feedState === "live" && liveCandles ? liveCandles : MOCK_CANDLES;
-  const overlay = React.useMemo(() => buildIllustrativeOverlay(activeCandles), [activeCandles]);
-  const activeZones = overlay.zones;
-  const activeSignal = overlay.signal;
+  const analysis = React.useMemo(() => analyzeMarket(activeCandles), [activeCandles]);
+  const activeZones = { supply: analysis.supply, demand: analysis.demand, fvg: analysis.fvg };
+  const activeSignal = analysis.signal;
 
   const steps = ["Membaca data OHLC", "Membaca screenshot chart", "Mendeteksi order block", "Menyusun kesimpulan"];
   const [stepIndex, setStepIndex] = useState(0);
@@ -809,8 +743,10 @@ export default function BimaMarketAnalyzer() {
             <CandleChart candles={activeCandles} zones={activeZones} signal={showZonesOnChart ? activeSignal : null} showZones={showZonesOnChart} />
             {showZonesOnChart && (
               <p style={{ fontFamily: FONT_UI, fontSize: 11.5, color: C.faint, marginTop: 10, marginBottom: 0 }}>
-                Zona & sinyal di atas masih pola ilustrasi yang diskalakan ke harga saat ini — bukan
-                hasil deteksi order block sungguhan. Algoritma real menyusul di tahap berikutnya.
+                Zona & sinyal dihitung otomatis dari struktur candle (swing → break of structure →
+                order block/FVG) — logika algoritmik sederhana, bukan machine learning, dan TP
+                dihitung dari kelipatan risiko (R), bukan target likuiditas spesifik. Bukan saran
+                finansial.
               </p>
             )}
           </div>
@@ -827,7 +763,7 @@ export default function BimaMarketAnalyzer() {
                 gap: 20,
               }}
             >
-              <BiasCard zones={activeZones} signal={activeSignal} />
+              <BiasCard direction={analysis.direction} confidence={analysis.confidence} zones={activeZones} />
               <SignalCard signal={activeSignal} tf={timeframe} />
               <ZonesList zones={activeZones} tf={timeframe} />
             </div>
