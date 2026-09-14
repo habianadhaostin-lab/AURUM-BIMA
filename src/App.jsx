@@ -64,7 +64,7 @@ const MOCK_CANDLES = [
 
 // Peta timeframe UI -> parameter interval yang dipahami /api/ohlc
 const TF_TO_INTERVAL = { M5: "M5", M15: "M15", H1: "H1", H4: "H4" };
-const POLL_MS = 60_000; // Twelve Data free tier: cukup poll tiap 60 detik
+const POLL_MS = 3 * 60_000; // 3 menit — 480 request/hari kalau tab dibiarkan terbuka 24 jam, aman di bawah limit 800/hari
 
 const TIMEFRAMES = ["M5", "M15", "H1", "H4"];
 
@@ -431,6 +431,7 @@ export default function BimaMarketAnalyzer() {
     let intervalId;
 
     async function fetchOhlc() {
+      if (document.hidden) return; // hemat kuota — jangan fetch kalau tab tidak sedang dilihat
       setFeedState((prev) => (prev === "live" ? "live" : "loading"));
       try {
         const res = await fetch(`/api/ohlc?timeframe=${TF_TO_INTERVAL[timeframe]}`);
@@ -453,11 +454,17 @@ export default function BimaMarketAnalyzer() {
       }
     }
 
+    function handleVisibility() {
+      if (!document.hidden) fetchOhlc(); // langsung refresh begitu tab dibuka lagi
+    }
+
     fetchOhlc();
     intervalId = setInterval(fetchOhlc, POLL_MS);
+    document.addEventListener("visibilitychange", handleVisibility);
     return () => {
       cancelled = true;
       clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [timeframe]);
 
