@@ -51,7 +51,9 @@ export default async function handler(req, res) {
         parseFloat(v.close),
       ]);
 
-    res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=59");
+    // Cache di edge Vercel selama 2 menit — kalau ada banyak tab/pengguna
+    // buka barengan dalam rentang itu, cuma dihitung 1x ke kuota Twelve Data.
+    res.setHeader("Cache-Control", "public, s-maxage=120, stale-while-revalidate=300");
     return res.status(200).json({
       candles,
       timeframe: tf,
