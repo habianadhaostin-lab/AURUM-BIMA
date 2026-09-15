@@ -301,9 +301,29 @@ function SignalCard({ signal, tf }) {
             letterSpacing: "0.03em",
           }}
         >
-          {isSell ? "SELL" : "BUY"}
+          {(signal.orderType || (isSell ? "SELL" : "BUY")).toUpperCase()}
         </span>
       </div>
+
+      {signal.orderNote && (
+        <p
+          style={{
+            fontFamily: FONT_UI,
+            fontSize: 12,
+            color: C.muted,
+            margin: "0 0 14px",
+            lineHeight: 1.5,
+          }}
+        >
+          {signal.orderNote}
+          {typeof signal.currentPrice === "number" && (
+            <span style={{ fontFamily: FONT_MONO, color: C.faint }}>
+              {" "}
+              (harga skrg {signal.currentPrice.toFixed(2)})
+            </span>
+          )}
+        </p>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
         {[
@@ -409,6 +429,75 @@ function ZonesList({ zones, tf }) {
   );
 }
 
+function VisionCard({ state, result, error }) {
+  if (state === "idle") return null;
+  return (
+    <div style={{ borderTop: `1px solid ${C.hair}`, paddingTop: 18 }}>
+      <SectionLabel>Konteks dari screenshot (AI vision)</SectionLabel>
+
+      {state === "loading" && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, color: C.muted, fontFamily: FONT_UI, fontSize: 13 }}>
+          <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />
+          Membaca screenshot...
+        </div>
+      )}
+
+      {state === "error" && (
+        <p style={{ fontFamily: FONT_UI, fontSize: 13, color: C.bear, margin: 0 }}>
+          Gagal membaca screenshot: {error}
+        </p>
+      )}
+
+      {state === "done" && result && (
+        <div>
+          <span
+            style={{
+              display: "inline-block",
+              fontFamily: FONT_MONO,
+              fontSize: 10.5,
+              color: C.void,
+              background: C.gold,
+              padding: "3px 9px",
+              borderRadius: 4,
+              marginBottom: 10,
+              textTransform: "uppercase",
+              letterSpacing: "0.03em",
+            }}
+          >
+            {result.bias || "tidak jelas"}
+          </span>
+
+          {result.polaVisual && (
+            <p style={{ fontFamily: FONT_UI, fontSize: 13.5, color: C.muted, lineHeight: 1.6, margin: "0 0 10px" }}>
+              {result.polaVisual}
+            </p>
+          )}
+
+          {Array.isArray(result.levelPenting) && result.levelPenting.length > 0 && (
+            <ul style={{ margin: "0 0 10px", paddingLeft: 18, fontFamily: FONT_MONO, fontSize: 12, color: C.text }}>
+              {result.levelPenting.map((lvl, i) => (
+                <li key={i} style={{ marginBottom: 4 }}>
+                  {lvl}
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {result.catatan && (
+            <p style={{ fontFamily: FONT_UI, fontSize: 12, color: C.faint, lineHeight: 1.5, margin: 0 }}>
+              {result.catatan}
+            </p>
+          )}
+
+          <p style={{ fontFamily: FONT_UI, fontSize: 11, color: C.faint, marginTop: 10, marginBottom: 0 }}>
+            Interpretasi visual dari AI — bukan angka presisi, dipakai sebagai konteks tambahan saja.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Main app
 // ---------------------------------------------------------------------------
@@ -417,8 +506,15 @@ export default function BimaMarketAnalyzer() {
   const [timeframe, setTimeframe] = useState("H1");
   const [ohlcText, setOhlcText] = useState("");
   const [image, setImage] = useState(null);
+  const [imagePayload, setImagePayload] = useState(null); // {base64, mediaType} hasil kompresi
+  const [imageBusy, setImageBusy] = useState(false);
   const [status, setStatus] = useState("idle"); // idle | running | done
   const fileRef = useRef(null);
+
+  // --- Analisis screenshot lewat Claude vision (/api/analyze-screenshot) -
+  const [visionState, setVisionState] = useState("idle"); // idle | loading | done | error
+  const [visionResult, setVisionResult] = useState(null);
+  const [visionError, setVisionError] = useState("");
 
   // --- Feed OHLC live (Twelve Data lewat /api/ohlc) ---------------------
   const [feedState, setFeedState] = useState("loading"); // loading | live | error
@@ -488,11 +584,78 @@ export default function BimaMarketAnalyzer() {
         setStatus("done");
       }
     }, 550);
+
+    const wantsScreenshot = (source === "screenshot" || source === "both") && imagePayload;
+    if (wantsScreenshot) {
+      setVisionState("loading");
+      setVisionError("");
+      fetch("/api/analyze-screenshot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageBase64: imagePayload.base64, mediaType: imagePayload.mediaType }),
+      })
+        .then(async (res) => {
+          const json = await res.json();
+          if (!res.ok || json.error) throw new Error(json.error || "Gagal menganalisis screenshot");
+          setVisionResult(json);
+          setVisionState("done");
+        })
+        .catch((err) => {
+          setVisionError(err.message);
+          setVisionState("error");
+        });
+    } else {
+      setVisionState("idle");
+      setVisionResult(null);
+    }
   };
 
-  const handleFile = (e) => {
+  // Kecilkan & kompres gambar di browser dulu (JPEG, maks 1280px) sebelum
+  // dikirim ke server — lebih cepat, lebih murah, dan mengurangi risiko
+  // kena limit ukuran body di serverless function.
+  function compressImageToBase64(file, maxDim = 1280, quality = 0.82) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          let { width, height } = img;
+          if (width > maxDim || height > maxDim) {
+            const scale = maxDim / Math.max(width, height);
+            width = Math.round(width * scale);
+            height = Math.round(height * scale);
+          }
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+          const dataUrl = canvas.toDataURL("image/jpeg", quality);
+          resolve({ base64: dataUrl.split(",")[1], mediaType: "image/jpeg" });
+        };
+        img.onerror = reject;
+        img.src = reader.result;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  const handleFile = async (e) => {
     const file = e.target.files?.[0];
-    if (file) setImage(URL.createObjectURL(file));
+    if (!file) return;
+    setImage(URL.createObjectURL(file));
+    setImagePayload(null);
+    setVisionState("idle");
+    setVisionResult(null);
+    setImageBusy(true);
+    try {
+      const payload = await compressImageToBase64(file);
+      setImagePayload(payload);
+    } catch {
+      setImagePayload(null);
+    } finally {
+      setImageBusy(false);
+    }
   };
 
   const showZonesOnChart = status === "done";
@@ -610,7 +773,12 @@ export default function BimaMarketAnalyzer() {
                     style={{ width: "100%", borderRadius: 8, border: `1px solid ${C.hair}`, display: "block" }}
                   />
                   <button
-                    onClick={() => setImage(null)}
+                    onClick={() => {
+                      setImage(null);
+                      setImagePayload(null);
+                      setVisionState("idle");
+                      setVisionResult(null);
+                    }}
                     style={{
                       position: "absolute",
                       top: 6,
@@ -625,6 +793,16 @@ export default function BimaMarketAnalyzer() {
                   >
                     <X size={12} color={C.muted} />
                   </button>
+                  <div
+                    style={{
+                      marginTop: 6,
+                      fontFamily: FONT_UI,
+                      fontSize: 11,
+                      color: imageBusy ? C.muted : imagePayload ? C.bull : C.bear,
+                    }}
+                  >
+                    {imageBusy ? "Mengompres gambar..." : imagePayload ? "Siap dianalisis" : "Gagal memproses gambar"}
+                  </div>
                 </div>
               ) : (
                 <button
@@ -773,6 +951,9 @@ export default function BimaMarketAnalyzer() {
               <BiasCard direction={analysis.direction} confidence={analysis.confidence} zones={activeZones} />
               <SignalCard signal={activeSignal} tf={timeframe} />
               <ZonesList zones={activeZones} tf={timeframe} />
+              {(source === "screenshot" || source === "both") && (
+                <VisionCard state={visionState} result={visionResult} error={visionError} />
+              )}
             </div>
           )}
 
