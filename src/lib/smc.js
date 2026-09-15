@@ -131,22 +131,51 @@ function fallbackZone(candles) {
   const win = candles.slice(Math.max(0, n - 12));
   const top = Math.max(...win.map((c) => c[1]));
   const bottom = Math.min(...win.map((c) => c[2]));
-  return { from: Math.max(0, n - 12), to: n - 1, top, bottom, mitigated: false };
+  return { from: Math.max(0, n - 12), to: n - 1, top, bottom, mitigated: false, isFallback: true };
 }
 
 // --- 6. Sinyal dari order block ----------------------------------------------
 // Entry di tepi zona (sisi yang berhadapan dengan harga saat ini), SL di
 // seberang zona + buffer kecil, TP1/TP2/TP3 dihitung sebagai kelipatan risiko
 // (1.5R / 2.5R / 4R dari jarak entry-SL) — bukan target likuiditas spesifik.
-function buildSignalFromZone(direction, top, bottom) {
+//
+// Jenis order ditentukan dari posisi entry relatif terhadap harga sekarang:
+//   BUY  + entry di BAWAH harga skrg -> Buy Limit  (nunggu harga turun dulu)
+//   BUY  + entry di ATAS harga skrg  -> Buy Stop   (nunggu breakout ke atas)
+//   SELL + entry di ATAS harga skrg  -> Sell Limit (nunggu harga naik dulu)
+//   SELL + entry di BAWAH harga skrg -> Sell Stop  (nunggu breakdown ke bawah)
+// Kalau harga sekarang sudah berada di dalam zona, order-nya Market.
+function resolveOrderType(direction, entry, currentPrice, zoneTop, zoneBottom, isFallback) {
+  // Zona fallback (rentang 12 candle terakhir) terlalu lebar untuk dipakai
+  // sebagai patokan "sudah di dalam zona" — harga hampir selalu masuk.
+  // Jadi cek ini cuma berlaku untuk order block yang benar-benar terdeteksi.
+  const insideZone = !isFallback && currentPrice <= zoneTop && currentPrice >= zoneBottom;
+  if (insideZone) {
+    return {
+      orderType: direction === "buy" ? "Buy Market" : "Sell Market",
+      orderNote: "Harga sudah berada di dalam zona — eksekusi langsung.",
+    };
+  }
+  if (direction === "buy") {
+    return entry < currentPrice
+      ? { orderType: "Buy Limit", orderNote: "Pasang pending order, tunggu harga turun ke zona." }
+      : { orderType: "Buy Stop", orderNote: "Pasang pending order, tunggu harga tembus ke atas." };
+  }
+  return entry > currentPrice
+    ? { orderType: "Sell Limit", orderNote: "Pasang pending order, tunggu harga naik ke zona." }
+    : { orderType: "Sell Stop", orderNote: "Pasang pending order, tunggu harga tembus ke bawah." };
+}
+
+function buildSignalFromZone(direction, top, bottom, currentPrice, isFallback) {
   const zoneHeight = Math.max(top - bottom, 0.01);
   const buffer = Math.max(zoneHeight * 0.15, top * 0.0004);
 
+  let signal;
   if (direction === "bullish") {
     const entry = top;
     const sl = bottom - buffer;
     const risk = entry - sl;
-    return {
+    signal = {
       direction: "buy",
       entry,
       sl,
@@ -154,18 +183,29 @@ function buildSignalFromZone(direction, top, bottom) {
       tp2: entry + risk * 2.5,
       tp3: entry + risk * 4,
     };
+  } else {
+    const entry = bottom;
+    const sl = top + buffer;
+    const risk = sl - entry;
+    signal = {
+      direction: "sell",
+      entry,
+      sl,
+      tp1: entry - risk * 1.5,
+      tp2: entry - risk * 2.5,
+      tp3: entry - risk * 4,
+    };
   }
-  const entry = bottom;
-  const sl = top + buffer;
-  const risk = sl - entry;
-  return {
-    direction: "sell",
-    entry,
-    sl,
-    tp1: entry - risk * 1.5,
-    tp2: entry - risk * 2.5,
-    tp3: entry - risk * 4,
-  };
+
+  const { orderType, orderNote } = resolveOrderType(
+    signal.direction,
+    signal.entry,
+    currentPrice,
+    top,
+    bottom,
+    isFallback
+  );
+  return { ...signal, orderType, orderNote, currentPrice };
 }
 
 // --- 7. Rangkai semuanya ------------------------------------------------------
@@ -193,8 +233,15 @@ export function analyzeMarket(candles) {
   let direction = lastOB ? lastOB.type : candles[n - 1][3] >= candles[0][3] ? "bullish" : "bearish";
   const activeZone = direction === "bullish" ? demand : supply;
 
-  const signal = buildSignalFromZone(direction, activeZone.top, activeZone.bottom);
-  const confidence = activeZone.mitigated ? 54 : 76;
+  const currentPrice = candles[n - 1][3];
+  const signal = buildSignalFromZone(
+    direction,
+    activeZone.top,
+    activeZone.bottom,
+    currentPrice,
+    !!activeZone.isFallback
+  );
+  const confidence = activeZone.isFallback ? 35 : activeZone.mitigated ? 54 : 76;
 
   return {
     direction,
